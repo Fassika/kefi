@@ -1,7 +1,5 @@
 streamlit
-json
-folium
-streamlit_folium 
-pandas 
+pandas
 plotly
-base64
+folium
+streamlit-folium
