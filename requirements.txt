@@ -3,3 +3,5 @@ pandas
 plotly
 folium
 streamlit-folium
+google-generativeai
+
