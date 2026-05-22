@@ -228,7 +228,7 @@ if st.button("Generate Management Report", type="primary"):
             genai.configure(api_key=api_key)
             
             # Using Gemini 1.5 Flash (the currently active optimal fast tier for text generation)
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-2.5-flash')
             response = model.generate_content(prompt)
             
             st.success("Briefing Generated Successfully")
