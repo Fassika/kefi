@@ -208,6 +208,10 @@ with col_charts:
 st.markdown("---")
 st.markdown("### 📑 Automated Executive Briefing")
 
+# 1. Initialize the session state variable if it doesn't exist yet
+if "executive_briefing" not in st.session_state:
+    st.session_state.executive_briefing = None
+
 # Define the Prompt
 prompt = f"""
 You are an independent consultant generating a formal executive briefing for the management of KEFI Gold and Copper regarding the Tulu Kapi Gold Project. 
@@ -227,16 +231,20 @@ if st.button("Generate Management Report", type="primary"):
             api_key = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=api_key)
             
-            # Using Gemini 1.5 Flash (the currently active optimal fast tier for text generation)
+            # Using Gemini 2.5 Flash
             model = genai.GenerativeModel('gemini-2.5-flash')
             response = model.generate_content(prompt)
             
+            # 2. Save the generated text into session memory
+            st.session_state.executive_briefing = response.text
             st.success("Briefing Generated Successfully")
-            st.markdown(f"> {response.text}")
             
-        except FileNotFoundError:
-            st.error("Error: Local Streamlit secrets file not found. Ensure you configured your API key.")
         except KeyError:
-            st.error("Error: GEMINI_API_KEY not found in Streamlit Secrets. Please configure it in your Streamlit Cloud dashboard.")
+            st.error("Error: GEMINI_API_KEY not found in Streamlit Secrets.")
         except Exception as e:
             st.error(f"An error occurred while communicating with the Gemini API: {e}")
+
+# 3. Always display the report down here if it exists in the memory bank
+if st.session_state.executive_briefing:
+    st.markdown("---")
+    st.markdown(st.session_state.executive_briefing)
