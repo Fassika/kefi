@@ -5,12 +5,7 @@ from streamlit_folium import st_folium
 import pandas as pd
 import plotly.express as px
 import base64
-
-TARGETS = {
-    "plant": 50,
-    "road": 200,
-    "genji": 500
-}
+import google.generativeai as genai
 
 # ==========================================
 # PAGE CONFIGURATION
@@ -27,6 +22,15 @@ st.markdown("""
     .metric-delta.negative { color: #f56565; }
     </style>
 """, unsafe_allow_html=True)
+
+# ==========================================
+# PROJECT TARGETS
+# ==========================================
+TARGETS = {
+    "plant": 100,
+    "road": 200,
+    "genji": 500
+}
 
 # ==========================================
 # LOAD DATA
@@ -57,13 +61,9 @@ df_genji = pd.DataFrame(data['genji']['history'])
 # ==========================================
 def apply_cummax_filter(df):
     if not df.empty and 'value' in df.columns:
-        # 1. Convert zeros (cloudy days) to NA
         df['value'] = df['value'].replace(0.0, pd.NA)
-        # 2. Forward fill the missing data (carry over previous known progress)
         df['value'] = df['value'].ffill()
-        # 3. Apply cumulative maximum so progress only goes up
         df['value'] = df['value'].cummax()
-        # 4. Fill any leading NAs at the start of the timeline with 0
         df['value'] = df['value'].fillna(0)
     return df
 
@@ -76,7 +76,6 @@ df_genji = apply_cummax_filter(df_genji)
 # ==========================================
 st.sidebar.title("System Controls")
 
-# Date Filter Logic
 st.sidebar.markdown("### 📅 Temporal Parameters")
 if not df_plant.empty:
     df_plant['date'] = pd.to_datetime(df_plant['date'])
@@ -88,7 +87,6 @@ if not df_plant.empty:
     
     date_range = st.sidebar.slider("Analysis Window", min_value=min_date, max_value=max_date, value=(min_date, max_date))
     
-    # Filter dataframes based on selection
     mask_plant = (df_plant['date'].dt.date >= date_range[0]) & (df_plant['date'].dt.date <= date_range[1])
     df_plant_filtered = df_plant.loc[mask_plant].reset_index(drop=True)
     
@@ -111,7 +109,6 @@ def calc_dynamic_metrics(df):
     if df.empty or len(df) < 1:
         return 0.0, 0.0
     current = df.iloc[-1]['value']
-    # If there are at least two rows, calculate delta from the start of the selected window to the end
     delta = current - df.iloc[0]['value'] if len(df) > 1 else 0.0
     return current, round(delta, 1)
 
@@ -140,7 +137,7 @@ def render_metric(col, title, current, target, delta, unit):
         """, unsafe_allow_html=True)
 
 render_metric(col1, "Lycopodium | Plant Clearing (ha)", p_curr, TARGETS["plant"], p_delta, "ha")
-render_metric(col2, "BCM | Access Road (km)", r_curr, TARGETS["road"], r_delta, "ha")
+render_metric(col2, "BCM | Access Road (km)", r_curr, TARGETS["road"], r_delta, "km")
 render_metric(col3, "Dashen | Genji Resettlement (Units)", int(g_curr), TARGETS["genji"], int(g_delta), "units")
 
 st.markdown("---")
@@ -154,11 +151,9 @@ with col_map:
     st.markdown("### 🗺️ Geospatial Verification")
     m = folium.Map(location=[9.0819, 35.5517], zoom_start=14, tiles="CartoDB positron")
     
-    # Overlay the True Color image downloaded from Copernicus
     img_base64 = get_image_base64("data/latest_view.jpg")
     if img_base64:
         img_html = f"data:image/jpeg;base64,{img_base64}"
-        # The exact bounding box we used in extractor.py
         bounds = [[9.065, 35.535], [9.095, 35.565]]
         folium.raster_layers.ImageOverlay(
             image=img_html,
@@ -167,12 +162,24 @@ with col_map:
             name="Copernicus Sentinel-2 RGB"
         ).add_to(m)
 
-    # Draw Polygons
     folium.Polygon(locations=[[9.078, 35.548], [9.078, 35.553], [9.083, 35.553], [9.083, 35.548]], color="blue", fill=False).add_to(m)
     folium.Polygon(locations=[[9.070, 35.540], [9.070, 35.550], [9.080, 35.550], [9.080, 35.540]], color="orange", fill=False).add_to(m)
     folium.Polygon(locations=[[9.085, 35.555], [9.085, 35.560], [9.090, 35.560], [9.090, 35.555]], color="green", fill=False).add_to(m)
     
     st_folium(m, height=450, use_container_width=True)
+    
+    # 1. Technical Methodology Expander
+    with st.expander("🔬 View Technical Methodology"):
+        st.markdown("""
+        **Optical Vegetation Clearing Detection**  
+        Clearing progress is mathematically verified utilizing the European Space Agency's Sentinel-2 satellite (10m spatial resolution). The algorithm calculates the Normalized Difference Vegetation Index (NDVI) derived from the sensor's Red (Band 4) and Near-Infrared (Band 8) spectrums.
+        """)
+        
+        st.latex(r"NDVI = \frac{NIR - Red}{NIR + Red}")
+        
+        st.markdown("""
+        A sustained localized drop in NDVI below 0.30 within the designated polygons is geometrically mapped and cross-verified against cloud data-masks. This correlates directly to earthworks progression, triggering an autonomous, tamper-proof update to the dashboard.
+        """)
 
 with col_charts:
     st.markdown("### 📈 Trajectory Analysis")
@@ -194,3 +201,42 @@ with col_charts:
         fig2 = px.area(df_genji_filtered, x="date", y="value", template="plotly_dark", title="Genji Village Expansion")
         fig2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=250, yaxis_title="Housing Units")
         st.plotly_chart(fig2, use_container_width=True)
+
+# ==========================================
+# 2. AUTOMATED EXECUTIVE BRIEFING
+# ==========================================
+st.markdown("---")
+st.markdown("### 📑 Automated Executive Briefing")
+
+# Define the Prompt
+prompt = f"""
+You are an independent consultant generating a formal executive briefing for the management of KEFI Gold and Copper regarding the Tulu Kapi Gold Project. 
+Review the latest verified satellite telemetry metrics:
+
+1. Plant Site Clearing (Contractor: Lycopodium): Currently at {p_curr} hectares out of a {TARGETS['plant']} hectare target. Change in selected window: {p_delta} ha.
+2. Access Road Development (Contractor: BCM): Currently at {r_curr} kilometers out of a {TARGETS['road']} km target. Change in selected window: {r_delta} km.
+3. Genji Resettlement Village Construction (Contractor: Dashen): Currently at {int(g_curr)} housing units out of a {TARGETS['genji']} unit target. Change in selected window: {int(g_delta)} units.
+
+Write a concise, highly professional 2-3 paragraph management summary. Do not include introductory or concluding pleasantries. Focus strictly on operational pace, milestone achievements against the targets, and data-driven insights derived directly from the optical telemetry provided. Format with clear headings if necessary.
+"""
+
+if st.button("Generate Management Report", type="primary"):
+    with st.spinner("Initiating LLM analysis..."):
+        try:
+            # Securely fetch API key from Streamlit's secrets manager
+            api_key = st.secrets["GEMINI_API_KEY"]
+            genai.configure(api_key=api_key)
+            
+            # Using Gemini 1.5 Flash (the currently active optimal fast tier for text generation)
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content(prompt)
+            
+            st.success("Briefing Generated Successfully")
+            st.markdown(f"> {response.text}")
+            
+        except FileNotFoundError:
+            st.error("Error: Local Streamlit secrets file not found. Ensure you configured your API key.")
+        except KeyError:
+            st.error("Error: GEMINI_API_KEY not found in Streamlit Secrets. Please configure it in your Streamlit Cloud dashboard.")
+        except Exception as e:
+            st.error(f"An error occurred while communicating with the Gemini API: {e}")
