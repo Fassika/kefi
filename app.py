@@ -1,199 +1,196 @@
 import streamlit as st
+import json
 import folium
 from streamlit_folium import st_folium
 import pandas as pd
 import plotly.express as px
-import google.generativeai as genai
-from datetime import datetime, timedelta
-import numpy as np
+import base64
+
+TARGETS = {
+    "plant": 50,
+    "road": 200,
+    "genji": 500
+}
 
 # ==========================================
 # PAGE CONFIGURATION
 # ==========================================
-st.set_page_config(
-    page_title="KEFI Gold | Sentinel-2 Tracking",
-    page_icon="🛰️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Tulu Kapi Tracker", page_icon="🛰️", layout="wide")
+
+st.markdown("""
+    <style>
+    .metric-container { display: flex; flex-direction: column; }
+    .metric-title { font-size: 12px; color: #a0aec0; margin-bottom: -10px;}
+    .metric-value { font-size: 32px; font-weight: bold; color: white; }
+    .metric-target { font-size: 18px; color: #a0aec0; }
+    .metric-delta { font-size: 14px; color: #48bb78; }
+    .metric-delta.negative { color: #f56565; }
+    </style>
+""", unsafe_allow_html=True)
 
 # ==========================================
-# SIMULATED SATELLITE DATA GENERATOR
+# LOAD DATA
 # ==========================================
-# Ensures a flawless pitch demonstration regardless of current cloud cover.
 @st.cache_data
-def generate_satellite_data(start_date, end_date):
-    # Sentinel-2 revisit frequency is ~5 days
-    dates = pd.date_range(start=start_date, end=end_date, freq='5D')
-    n = len(dates)
-    
-    # Simulate cumulative physical progress
-    plant_cleared = np.linspace(0, 38, n) + np.random.normal(0, 0.5, n)
-    road_progress = np.linspace(0, 14.2, n) + np.random.normal(0, 0.2, n)
-    housing_units = np.linspace(0, 115, n) + np.random.normal(0, 2, n)
-    
-    df = pd.DataFrame({
-        'Date': dates,
-        'Lycopodium_Plant_ha': np.clip(plant_cleared, 0, 50),
-        'BCM_Road_km': np.clip(road_progress, 0, 28),
-        'Dashen_Housing_Units': np.clip(housing_units, 0, 300).astype(int)
-    })
+def load_data():
+    try:
+        with open("data/metrics.json", "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        st.error("🚨 Data not found. Run `python extractor.py` first.")
+        st.stop()
+
+def get_image_base64(filepath):
+    try:
+        with open(filepath, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode()
+    except FileNotFoundError:
+        return None
+
+data = load_data()
+df_plant = pd.DataFrame(data['plant']['history'])
+df_road = pd.DataFrame(data['road']['history'])
+df_genji = pd.DataFrame(data['genji']['history'])
+
+# ==========================================
+# DATA SMOOTHING (CUMULATIVE MAX FILTER)
+# ==========================================
+def apply_cummax_filter(df):
+    if not df.empty and 'value' in df.columns:
+        # 1. Convert zeros (cloudy days) to NA
+        df['value'] = df['value'].replace(0.0, pd.NA)
+        # 2. Forward fill the missing data (carry over previous known progress)
+        df['value'] = df['value'].ffill()
+        # 3. Apply cumulative maximum so progress only goes up
+        df['value'] = df['value'].cummax()
+        # 4. Fill any leading NAs at the start of the timeline with 0
+        df['value'] = df['value'].fillna(0)
     return df
 
+df_plant = apply_cummax_filter(df_plant)
+df_road = apply_cummax_filter(df_road)
+df_genji = apply_cummax_filter(df_genji)
+
 # ==========================================
-# UI & SIDEBAR
+# SIDEBAR & DATE FILTER
 # ==========================================
-st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/Satellite_icon.svg/512px-Satellite_icon.svg.png", width=50)
 st.sidebar.title("System Controls")
+
+# Date Filter Logic
+st.sidebar.markdown("### 📅 Temporal Parameters")
+if not df_plant.empty:
+    df_plant['date'] = pd.to_datetime(df_plant['date'])
+    df_road['date'] = pd.to_datetime(df_road['date'])
+    df_genji['date'] = pd.to_datetime(df_genji['date'])
+    
+    min_date = df_plant['date'].min().date()
+    max_date = df_plant['date'].max().date()
+    
+    date_range = st.sidebar.slider("Analysis Window", min_value=min_date, max_value=max_date, value=(min_date, max_date))
+    
+    # Filter dataframes based on selection
+    mask_plant = (df_plant['date'].dt.date >= date_range[0]) & (df_plant['date'].dt.date <= date_range[1])
+    df_plant_filtered = df_plant.loc[mask_plant].reset_index(drop=True)
+    
+    mask_road = (df_road['date'].dt.date >= date_range[0]) & (df_road['date'].dt.date <= date_range[1])
+    df_road_filtered = df_road.loc[mask_road].reset_index(drop=True)
+    
+    mask_genji = (df_genji['date'].dt.date >= date_range[0]) & (df_genji['date'].dt.date <= date_range[1])
+    df_genji_filtered = df_genji.loc[mask_genji].reset_index(drop=True)
+else:
+    st.sidebar.warning("No historical data available. Run extraction again.")
+    df_plant_filtered, df_road_filtered, df_genji_filtered = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
 st.sidebar.markdown("---")
+st.sidebar.info("🛰️ **Data Source:** Sentinel-2 (10m)\n\n🔄 **Revisit:** 5 Days\n\n📷 **Sensor:** MSI Optical")
 
-api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Required for Executive Report Generation")
+# ==========================================
+# DYNAMIC METRIC CALCULATION
+# ==========================================
+def calc_dynamic_metrics(df):
+    if df.empty or len(df) < 1:
+        return 0.0, 0.0
+    current = df.iloc[-1]['value']
+    # If there are at least two rows, calculate delta from the start of the selected window to the end
+    delta = current - df.iloc[0]['value'] if len(df) > 1 else 0.0
+    return current, round(delta, 1)
 
-st.sidebar.subheader("Temporal Parameters")
-date_range = st.sidebar.date_input(
-    "Analysis Window",
-    value=(datetime.today() - timedelta(days=180), datetime.today()),
-    max_value=datetime.today()
-)
-
-st.sidebar.markdown("---")
-st.sidebar.info("🛰️ **Data Source:** Sentinel-2 (10m)\n\n🔄 **Revisit:** 5 Days\n\n📡 **Sensor:** MSI Optical")
+p_curr, p_delta = calc_dynamic_metrics(df_plant_filtered)
+r_curr, r_delta = calc_dynamic_metrics(df_road_filtered)
+g_curr, g_delta = calc_dynamic_metrics(df_genji_filtered)
 
 # ==========================================
 # MAIN DASHBOARD
 # ==========================================
 st.title("🛰️ Tulu Kapi Construction & Resettlement Tracker")
-st.markdown("""
-This system provides a single pane of glass to independently verify contractor milestones via multi-spectral satellite imagery. 
-""")
 
-if len(date_range) == 2:
-    start_date, end_date = date_range
-    df = generate_satellite_data(start_date, end_date)
+st.markdown("### 📊 Real-Time Contractor Milestones")
+col1, col2, col3 = st.columns(3)
+
+def render_metric(col, title, current, target, delta, unit):
+    arrow = "↑" if delta >= 0 else "↓"
+    color_class = "" if delta >= 0 else "negative"
+    with col:
+        st.markdown(f"""
+        <div class="metric-container">
+            <div class="metric-title">{title}</div>
+            <div><span class="metric-value">{current}</span><span class="metric-target"> / {target}</span></div>
+            <div class="metric-delta {color_class}">{arrow} {abs(delta)} {unit} (in selected window)</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+render_metric(col1, "Lycopodium | Plant Clearing (ha)", p_curr, TARGETS["plant"], p_delta, "ha")
+render_metric(col2, "BCM | Access Road (km)", r_curr, TARGETS["road"], r_delta, "ha")
+render_metric(col3, "Dashen | Genji Resettlement (Units)", int(g_curr), TARGETS["genji"], int(g_delta), "units")
+
+st.markdown("---")
+
+# ==========================================
+# MAP & CHARTS
+# ==========================================
+col_map, col_charts = st.columns([1, 1.2])
+
+with col_map:
+    st.markdown("### 🗺️ Geospatial Verification")
+    m = folium.Map(location=[9.0819, 35.5517], zoom_start=14, tiles="CartoDB positron")
     
-    latest = df.iloc[-1]
-    previous = df.iloc[-2] if len(df) > 1 else latest
-    
-    # KPIs
-    st.markdown("### 📊 Real-Time Contractor Milestones")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        delta_lyc = latest['Lycopodium_Plant_ha'] - previous['Lycopodium_Plant_ha']
-        st.metric(label="Lycopodium | Plant Clearing (ha)", 
-                  value=f"{latest['Lycopodium_Plant_ha']:.1f} / 50", 
-                  delta=f"{delta_lyc:.1f} ha (last 5 days)")
-                  
-    with col2:
-        delta_bcm = latest['BCM_Road_km'] - previous['BCM_Road_km']
-        st.metric(label="BCM | Access Road (km)", 
-                  value=f"{latest['BCM_Road_km']:.1f} / 28", 
-                  delta=f"{delta_bcm:.1f} km (last 5 days)")
-                  
-    with col3:
-        delta_dash = latest['Dashen_Housing_Units'] - previous['Dashen_Housing_Units']
-        st.metric(label="Dashen | Genji Resettlement (Units)", 
-                  value=f"{latest['Dashen_Housing_Units']} / 300", 
-                  delta=f"{int(delta_dash)} units (last 5 days)")
-
-    st.markdown("---")
-
-    # Layout for Map and Charts
-    map_col, chart_col = st.columns([1.2, 1])
-
-    with map_col:
-        st.markdown("### 🗺️ Geospatial Verification")
-        # Approximate coordinates for Tulu Kapi region
-        tulu_kapi_lat, tulu_kapi_lon = 9.0111, 35.4444
-        
-        m = folium.Map(location=[tulu_kapi_lat, tulu_kapi_lon], zoom_start=13, tiles="CartoDB positron")
-        
-        # Simulated Feature: Lycopodium Plant Footprint
-        folium.Polygon(
-            locations=[[9.015, 35.440], [9.015, 35.448], [9.008, 35.448], [9.008, 35.440]],
-            color="red", fill=True, fill_opacity=0.3, popup="Plant Footprint (Lycopodium)"
+    # Overlay the True Color image downloaded from Copernicus
+    img_base64 = get_image_base64("data/latest_view.jpg")
+    if img_base64:
+        img_html = f"data:image/jpeg;base64,{img_base64}"
+        # The exact bounding box we used in extractor.py
+        bounds = [[9.065, 35.535], [9.095, 35.565]]
+        folium.raster_layers.ImageOverlay(
+            image=img_html,
+            bounds=bounds,
+            opacity=1.0,
+            name="Copernicus Sentinel-2 RGB"
         ).add_to(m)
 
-        # Simulated Feature: Dashen Resettlement
-        folium.Polygon(
-            locations=[[9.020, 35.430], [9.020, 35.435], [9.016, 35.435], [9.016, 35.430]],
-            color="blue", fill=True, fill_opacity=0.3, popup="Genji Resettlement (Dashen)"
-        ).add_to(m)
+    # Draw Polygons
+    folium.Polygon(locations=[[9.078, 35.548], [9.078, 35.553], [9.083, 35.553], [9.083, 35.548]], color="blue", fill=False).add_to(m)
+    folium.Polygon(locations=[[9.070, 35.540], [9.070, 35.550], [9.080, 35.550], [9.080, 35.540]], color="orange", fill=False).add_to(m)
+    folium.Polygon(locations=[[9.085, 35.555], [9.085, 35.560], [9.090, 35.560], [9.090, 35.555]], color="green", fill=False).add_to(m)
+    
+    st_folium(m, height=450, use_container_width=True)
+
+with col_charts:
+    st.markdown("### 📈 Trajectory Analysis")
+    
+    if not df_plant_filtered.empty and not df_road_filtered.empty:
+        df_p_chart = df_plant_filtered.copy()
+        df_r_chart = df_road_filtered.copy()
+        df_p_chart['Contractor'] = 'Lycopodium_Plant_ha'
+        df_r_chart['Contractor'] = 'BCM_Road_ha'
+        df_combined = pd.concat([df_p_chart, df_r_chart])
         
-        # Simulated Feature: BCM Road Line
-        folium.PolyLine(
-            locations=[[9.011, 35.444], [9.030, 35.480], [9.060, 35.520]],
-            color="orange", weight=5, popup="Main Access Road (BCM)"
-        ).add_to(m)
+        fig1 = px.line(df_combined, x="date", y="value", color='Contractor', 
+                       color_discrete_map={'Lycopodium_Plant_ha': 'blue', 'BCM_Road_ha': 'orange'},
+                       template="plotly_dark", title="Earthworks & Infrastructure Pace")
+        fig1.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=250, yaxis_title="Hectares")
+        st.plotly_chart(fig1, use_container_width=True)
 
-        st_folium(m, height=400, use_container_width=True)
-
-        with st.expander("🔬 View Technical Methodology"):
-            st.markdown("""
-            **Optical Vegetation Clearing Detection**
-            Clearing progress is mathematically verified using the Normalized Difference Vegetation Index (NDVI) derived from Sentinel-2's Red (Band 4) and Near-Infrared (Band 8) spectrums.
-            
-            $$NDVI = \\frac{NIR - Red}{NIR + Red}$$
-            
-            A sustained localized drop in NDVI below 0.2 within the designated polygons correlates directly to earthworks progression, triggering an autonomous update to the dashboard.
-            """)
-
-    with chart_col:
-        st.markdown("### 📈 Trajectory Analysis")
-        
-        # Melt DataFrame for Plotly
-        df_melted = df.melt(id_vars=['Date'], 
-                            value_vars=['Lycopodium_Plant_ha', 'BCM_Road_km'],
-                            var_name='Contractor', 
-                            value_name='Progress')
-                            
-        fig = px.line(df_melted, x='Date', y='Progress', color='Contractor', 
-                      title="Earthworks & Infrastructure Pace",
-                      template="plotly_white")
-        fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-        st.plotly_chart(fig, use_container_width=True)
-
-        fig2 = px.area(df, x='Date', y='Dashen_Housing_Units', 
-                       title="Genji Village Expansion",
-                       color_discrete_sequence=['#1f77b4'],
-                       template="plotly_white")
+    if not df_genji_filtered.empty:
+        fig2 = px.area(df_genji_filtered, x="date", y="value", template="plotly_dark", title="Genji Village Expansion")
+        fig2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=250, yaxis_title="Housing Units")
         st.plotly_chart(fig2, use_container_width=True)
-
-    # ==========================================
-    # GEMINI AI REPORT GENERATION
-    # ==========================================
-    st.markdown("---")
-    st.markdown("### 📑 Automated Executive Briefing")
-    
-    if st.button("Generate Management Report", type="primary"):
-        if not api_key:
-            st.warning("Please enter your Gemini API Key in the sidebar to generate the report.")
-        else:
-            with st.spinner("Analyzing satellite telemetry and drafting executive summary via Gemini..."):
-                try:
-                    genai.configure(api_key=api_key)
-                    # gemini-2.5-flash is the premier model for free-tier speed and reasoning
-                    model = genai.GenerativeModel('gemini-2.5-flash')
-                    
-                    prompt = f"""
-                    You are a strict, highly analytical mining infrastructure auditor reporting to the management of KEFI Gold's Tulu Kapi project.
-                    Based on the latest Sentinel-2 satellite data from {latest['Date'].strftime('%Y-%m-%d')}, generate a concise, highly professional 3-paragraph executive summary.
-                    
-                    Current Data:
-                    - BCM (Main Access Road): {latest['BCM_Road_km']:.1f} / 28 km completed.
-                    - Lycopodium (Plant Site): {latest['Lycopodium_Plant_ha']:.1f} / 50 hectares cleared.
-                    - Dashen (Genji Resettlement): {latest['Dashen_Housing_Units']} / 300 housing units detected.
-                    
-                    Instructions:
-                    1. Paragraph 1: Give a factual overview of the current status based solely on the numbers.
-                    2. Paragraph 2: Analyze the pace. If road completion is lagging behind plant clearing, point this out as a logistical risk. 
-                    3. Paragraph 3: Provide one actionable recommendation for the executive board regarding contractor oversight.
-                    Maintain an objective, technical, and executive tone. Do not use fluff.
-                    """
-                    
-                    response = model.generate_content(prompt)
-                    st.success("Report Generated Successfully")
-                    st.write(response.text)
-                    
-                except Exception as e:
-                    st.error(f"Error generating report: {e}")
