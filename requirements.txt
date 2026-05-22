@@ -1,7 +1,7 @@
 streamlit
+json
 folium
-streamlit-folium
-earthengine-api
-google-generativeai
-pandas
+streamlit_folium 
+pandas 
 plotly
+base64
